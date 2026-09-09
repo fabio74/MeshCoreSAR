@@ -5,4 +5,10 @@ l'applicazione chiede al device conensso la lista dei device conenssi come conta
 c'è la possibilità di selezionare i device da tracciare.
 Si possono utilizzare mappe online e carte TIFF ofline.
 
+serve Python 3.12
+
+su windows lanciare il file run_windows.BAT
+
+in macOs lanciare il commad: run_macos.command
+
 
