@@ -1,2 +1,8 @@
 # MeshCoreSAR
-python application for windows and MacOs for connect ad show the track of the node device conencted
+Applicazione Python per Windows e MacOs.
+
+l'applicazione chiede al device conensso la lista dei device conenssi come contatti e li visualizza.
+c'è la possibilità di selezionare i device da tracciare.
+Si possono utilizzare mappe online e carte TIFF ofline.
+
+
