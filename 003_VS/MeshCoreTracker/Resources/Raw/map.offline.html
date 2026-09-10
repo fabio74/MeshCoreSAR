@@ -1,0 +1,146 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<link rel="stylesheet" href="leaflet.css" />
+<style>
+html,body,#map{height:100%;width:100%;margin:0;background:#e9ecef}
+.leaflet-tooltip{font-family:Arial,sans-serif}
+#offlineBadge{position:absolute;right:12px;top:12px;z-index:1000;background:white;padding:6px 9px;border-radius:4px;box-shadow:0 1px 5px rgba(0,0,0,.3);font:12px Arial;display:none}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="offlineBadge">GeoTIFF offline</div>
+<script src="leaflet.js"></script>
+<script src="proj4.js"></script>
+<script src="geotiff.js"></script>
+<script>
+const map=L.map('map',{zoomControl:true}).setView([45.5,11.5],9);
+const baseLayers={
+  osm:L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}),
+  topo:L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'Map data &copy; OpenStreetMap contributors, SRTM | Map style &copy; OpenTopoMap'}),
+  esri:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles &copy; Esri'})
+};
+let currentBase=baseLayers.osm.addTo(map);
+let offlineOverlay=null;
+const tracks={};
+const palette=['#d32f2f','#1976d2','#388e3c','#7b1fa2','#f57c00','#00796b','#455a64','#c2185b'];
+let geoUploadName='';
+let geoUploadChunks=[];
+let geoStatus='IDLE';
+
+function colorFor(name){let h=0;for(let i=0;i<name.length;i++)h=((h<<5)-h)+name.charCodeAt(i);return palette[Math.abs(h)%palette.length];}
+function setBaseLayer(kind){
+  if(currentBase)map.removeLayer(currentBase);
+  if(offlineOverlay){map.removeLayer(offlineOverlay);offlineOverlay=null;}
+  document.getElementById('offlineBadge').style.display='none';
+  currentBase=baseLayers[kind]||baseLayers.osm;
+  currentBase.addTo(map);
+  return kind;
+}
+function upsertTrack(name,points,visible){
+  if(!points||points.length===0)return;
+  const color=colorFor(name),latlngs=points.map(p=>[p.lat,p.lon]),last=points[points.length-1];
+  if(!tracks[name]){
+    tracks[name]={
+      line:L.polyline(latlngs,{color:color,weight:4,opacity:.82}),
+      marker:L.circleMarker([last.lat,last.lon],{radius:7,color:color,fillColor:color,fillOpacity:.95}),
+      visible:false
+    };
+  }else{
+    tracks[name].line.setLatLngs(latlngs);
+    tracks[name].marker.setLatLng([last.lat,last.lon]);
+  }
+  tracks[name].marker.bindTooltip(name);
+  tracks[name].marker.bindPopup('<b>'+escapeHtml(name)+'</b><br>'+last.lat.toFixed(6)+', '+last.lon.toFixed(6)+(last.alt==null?'':'<br>Alt: '+last.alt.toFixed(1)+' m')+'<br>'+escapeHtml(last.time||''));
+  setTrackVisible(name,visible);
+}
+function setTrackVisible(name,visible){
+  const t=tracks[name]; if(!t)return;
+  if(visible&&!t.visible){t.line.addTo(map);t.marker.addTo(map);t.visible=true;}
+  else if(!visible&&t.visible){map.removeLayer(t.line);map.removeLayer(t.marker);t.visible=false;}
+}
+function fitVisibleTracks(){
+  const pts=[];Object.values(tracks).forEach(t=>{if(t.visible)t.line.getLatLngs().forEach(p=>pts.push(p));});
+  if(offlineOverlay){const b=offlineOverlay.getBounds();if(b.isValid())pts.push(b.getSouthWest(),b.getNorthEast());}
+  if(pts.length===1)map.setView(pts[0],15);else if(pts.length>1)map.fitBounds(L.latLngBounds(pts),{padding:[35,35]});
+}
+function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+
+function beginGeoTiffUpload(name){geoUploadName=name;geoUploadChunks=[];return 'OK';}
+function appendGeoTiffChunk(chunk){geoUploadChunks.push(chunk);return geoUploadChunks.length;}
+function finishGeoTiffUpload(){
+  geoStatus='LOADING';
+  (async()=>{
+    try{
+      const base64=geoUploadChunks.join('');geoUploadChunks=[];
+      const binary=atob(base64),bytes=new Uint8Array(binary.length);
+      for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+      const tiff=await GeoTIFF.fromArrayBuffer(bytes.buffer);
+      const image=await tiff.getImage();
+      const bbox=image.getBoundingBox();
+      const keys=image.getGeoKeys()||{};
+      const projectedEpsg=Number(keys.ProjectedCSTypeGeoKey||0);
+      const geographicEpsg=Number(keys.GeographicTypeGeoKey||0);
+      const epsg=Number(projectedEpsg||geographicEpsg||0);
+      const bounds=geoBoundsToLatLng(bbox,epsg);
+      const srcW=image.getWidth(),srcH=image.getHeight();
+      const scale=Math.min(1,2500/Math.max(srcW,srcH));
+      const w=Math.max(1,Math.round(srcW*scale)),h=Math.max(1,Math.round(srcH*scale));
+      const samples=image.getSamplesPerPixel();
+      const wanted=samples>=3?[0,1,2]:[0];
+      const rasters=await image.readRasters({samples:wanted,width:w,height:h,interleave:false});
+      const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+      const ctx=canvas.getContext('2d'),img=ctx.createImageData(w,h);
+      const stats=rasters.map(r=>rangeSample(r));
+      for(let i=0;i<w*h;i++){
+        let r,g,b;
+        if(rasters.length>=3){r=scaleValue(rasters[0][i],stats[0]);g=scaleValue(rasters[1][i],stats[1]);b=scaleValue(rasters[2][i],stats[2]);}
+        else{r=g=b=scaleValue(rasters[0][i],stats[0]);}
+        const j=i*4;img.data[j]=r;img.data[j+1]=g;img.data[j+2]=b;img.data[j+3]=255;
+      }
+      ctx.putImageData(img,0,0);
+      if(currentBase){map.removeLayer(currentBase);currentBase=null;}
+      if(offlineOverlay)map.removeLayer(offlineOverlay);
+      offlineOverlay=L.imageOverlay(canvas.toDataURL('image/png'),bounds,{opacity:1,interactive:false}).addTo(map);
+      document.getElementById('offlineBadge').style.display='block';
+      map.fitBounds(bounds,{padding:[10,10]});
+      geoStatus='OK '+geoUploadName+' CRS EPSG:'+epsg+(projectedEpsg&&geographicEpsg?' (base EPSG:'+geographicEpsg+')':'')+' '+srcW+'x'+srcH;
+    }catch(e){geoUploadChunks=[];geoStatus='ERROR '+(e&&e.message?e.message:String(e));}
+  })();
+  return 'STARTED';
+}
+function getGeoTiffStatus(){return geoStatus;}
+function geoBoundsToLatLng(b,epsg){
+  if(epsg===0){
+    const looksGeographic=b[0]>=-180&&b[2]<=180&&b[1]>=-90&&b[3]<=90;
+    if(!looksGeographic)throw new Error('GeoTIFF georeferenziato ma CRS/EPSG non identificabile');
+    epsg=4326;
+  }
+  const p1=to4326([b[0],b[1]],epsg),p2=to4326([b[2],b[3]],epsg);
+  const south=Math.min(p1[1],p2[1]),north=Math.max(p1[1],p2[1]),west=Math.min(p1[0],p2[0]),east=Math.max(p1[0],p2[0]);
+  return L.latLngBounds([south,west],[north,east]);
+}
+function to4326(p,epsg){
+  if(epsg===4326){return p;}
+  if(epsg===3857){return proj4('EPSG:3857','EPSG:4326',p);}
+  // ED50 / UTM zones commonly found in Italian legacy cartography.
+  // The 3-parameter ED50 -> WGS84 transformation is an approximation suitable
+  // for display/field-map overlay; authoritative cadastral/geodetic work may
+  // require an area-specific grid transformation.
+  if(epsg===23032||epsg===23033){
+    const z=epsg-23000,code='MC'+epsg;
+    proj4.defs(code,'+proj=utm +zone='+z+' +ellps=intl +towgs84=-87,-98,-121,0,0,0,0 +units=m +no_defs +type=crs');
+    return proj4(code,'EPSG:4326',p);
+  }
+  if(epsg>=32601&&epsg<=32660){const z=epsg-32600,code='MC'+epsg;proj4.defs(code,'+proj=utm +zone='+z+' +datum=WGS84 +units=m +no_defs +type=crs');return proj4(code,'EPSG:4326',p);}
+  if(epsg>=32701&&epsg<=32760){const z=epsg-32700,code='MC'+epsg;proj4.defs(code,'+proj=utm +zone='+z+' +south +datum=WGS84 +units=m +no_defs +type=crs');return proj4(code,'EPSG:4326',p);}
+  throw new Error('CRS GeoTIFF non supportato: EPSG '+epsg);
+}
+function rangeSample(a){let lo=Infinity,hi=-Infinity;const step=Math.max(1,Math.floor(a.length/20000));for(let i=0;i<a.length;i+=step){const v=Number(a[i]);if(Number.isFinite(v)){if(v<lo)lo=v;if(v>hi)hi=v;}}if(!Number.isFinite(lo)||hi<=lo){lo=0;hi=255;}return[lo,hi];}
+function scaleValue(v,s){const x=(Number(v)-s[0])*255/(s[1]-s[0]);return Math.max(0,Math.min(255,Math.round(x)));}
+</script>
+</body>
+</html>
