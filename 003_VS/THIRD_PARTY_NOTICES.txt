@@ -1,0 +1,7 @@
+MeshCore Tracker includes browser-side open source libraries in Resources/Raw:
+
+Leaflet 1.9.4 — BSD-2-Clause — https://leafletjs.com/
+geotiff.js 3.0.5 — MIT — https://github.com/geotiffjs/geotiff.js
+Proj4js 2.22.0 — MIT — https://proj4js.org/
+
+Online basemap data/tiles remain subject to their respective providers' terms and attribution requirements: OpenStreetMap, OpenTopoMap and Esri.
